@@ -253,15 +253,19 @@ Remove-AzSqlServerFirewallRuleByPattern @ServerParams -FirewallRuleNamePattern "
 ```
 
 #>
-
 function Remove-AzSqlServerFirewallRuleByPattern {
     [cmdletbinding()]
     param(
         # Resource Group Name
+        [Parameter(Mandatory = $true, Position = 0)][ValidateNotNull()][ValidateNotNullOrEmpty()]
         [string]$ResourceGroupName,
+
         # Azure Sql Server name - FQDN or resource name.
+        [Parameter(Mandatory = $true, Position = 1)][ValidateNotNull()][ValidateNotNullOrEmpty()]
         [string]$ServerName,
+
         # Pattern to match
+        [Parameter(Mandatory = $true, Position = 2)][ValidateNotNull()][ValidateNotNullOrEmpty()]
         [string]$FirewallRuleNamePattern
     )
 
