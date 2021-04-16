@@ -81,20 +81,45 @@ $ConnectionParams = @{
     Username = $Env:DB_USERNAME
     Password = $Env:DB_PASSWORD
 }
+try {
+    # Use Ensure-SqlFirewallClientAccessRule to make sure firewall rule
+    # allowing client connection is in place.
+    $NewRuleName = Ensure-SqlFirewallClientAccessRule -ConnectionParams $ConnectionParams -RuleNamePrefix "deploy-" -Verbose
 
-Ensure-SqlFirewallClientAccessRule -ConnectionParams $ConnectionParams -RuleNamePrefix "deploy-" -Verbose
-
+    # Do something in the database
+    Invoke-SqlCmd @ConnectionParams -Query "SELECT getdate()"
+} finally {
+    # In case firewall rule was created, remove it
+    if ($NewRuleName) {
+        $ServerParams = Detect-AzSqlServerFromConnectionParams $ConnectionParams -Verbose
+        Remove-AzSqlServerFirewallRule @ServerParams -FirewallRuleName $NewRuleName
+    }
+}
 ```
 
 #>
 function Ensure-SqlFirewallClientAccessRule {
     [cmdletbinding()]
     param(
-        $ConnectionParams,
-        $RuleName,
-        $RuleNamePrefix,
-        $ResourceGroupName,
-        $ServerName
+        # Sql connection parameters to pass to Invoke-SqlCmd.
+        [Parameter(Mandatory = $true, Position = 0)][ValidateNotNull()][ValidateNotNullOrEmpty()]
+        [hashtable]$ConnectionParams,
+
+        # Optional firewall rule name. If not provided, new rule name is generated using the RuleNamePrefix parameter and New-Guid
+        [Parameter(Mandatory = $false)]
+        [string]$RuleName,
+
+        # Optional firewall rule name prefix to be added to the generated rule name.
+        [Parameter(Mandatory = $false)]
+        [string]$RuleNamePrefix,
+
+        # Optional Resource Group Name.
+        [Parameter(Mandatory = $false)]
+        [string]$ResourceGroupName,
+        
+        # Optional Sql Server resource name
+        [Parameter(Mandatory = $false)]
+        [string]$ServerName
     )
 
     $RequiredClientIp = Detect-SqlRequiredFirewallClientIp -ConnectionParams $ConnectionParams
@@ -103,12 +128,69 @@ function Ensure-SqlFirewallClientAccessRule {
         Return $False
     }
 
+    $ServerParams = Detect-AzSqlServerFromConnectionParams -ConnectionParams $ConnectionParams -ResourceGroupName $ResourceGroupName -ServerName $ServerName
+
+    if (-not $RuleName) {
+        $RuleName = "$RuleNamePrefix$(New-Guid)"
+        Write-Verbose "RuleName not provided. Generated rule name is: $RuleName"
+    }
+
+    $StartIp = $RequiredClientIp
+    $EndIp = $RequiredClientIp
+
+    Write-Verbose "Adding new firewall rule $RuleName to $ResourceGroupName/$ServerName for range $StartIp - $EndIp"
+
+    $Output = New-AzSqlServerFirewallRule @ServerParams -FirewallRuleName $RuleName -StartIpAddress $StartIp -EndIpAddress $EndIp
+    Return $RuleName
+}
+
+
+<#
+.SYNOPSIS
+Find Sql Server details from connection parameters.
+
+.DESCRIPTION
+Find Sql Server details from connection parameters.
+
+.OUTPUTS
+Sql Server details hashtable
+
+.EXAMPLE
+
+```powershell
+$ConnectionParams = @{
+    ServerInstance = "$($Env:DB_SERVER).database.windows.net"
+    Database = $Env:DB_DATABASE
+    Username = $Env:DB_USERNAME
+    Password = $Env:DB_PASSWORD
+}
+
+$ServerParams = Detect-AzSqlServerFromConnectionParams $ConnectionParams -Verbose
+Remove-AzSqlServerFirewallRule @ServerParams -FirewallRuleName $NewRuleName
+```
+
+#>
+function Detect-AzSqlServerFromConnectionParams {
+    [cmdletbinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)][ValidateNotNull()][ValidateNotNullOrEmpty()]
+        [hashtable]$ConnectionParams,
+
+        # Optional Resource Group Name. If not provided, the result from Get-SqlServer is used.
+        [Parameter(Mandatory = $false)]
+        [string]$ResourceGroupName,
+
+        # Optinal Server Name. If not provided, the ServerInstance connection parameter is used.
+        [Parameter(Mandatory = $false)]
+        [string]$ServerName
+    )
     if (-not $ServerName) {
         $ServerName = $ConnectionParams.ServerInstance.Split('.')[0]
-        Write-Verbose "ServerName not provided, using ConnectionParams.ServerInstance: $ServerName"
+        Write-Verbose "ServerName not provided, using ConnectionParams.ServerInstance."
         if (-not $ServerName) {
             Throw "ServerName not provided. Trying to use ConnectionParams.ServerInstance also did not return result."
         }
+        Write-Verbose "ServerName found: $ServerName"
     }
 
     if (-not $ResourceGroupName) {
@@ -121,19 +203,77 @@ function Ensure-SqlFirewallClientAccessRule {
         Write-Verbose "ResourceGroupName found: $ResourceGroupName"
     }
 
-    if (-not $RuleName) {
-        $RuleName = "$RuleNamePrefix$(New-Guid)"
-        Write-Verbose "RuleName not provided. Generated rule name is: $RuleName"
+    $ServerDetails = @{
+        ResourceGroupName = $ResourceGroupName
+        ServerName = $ServerName
     }
 
-    $StartIp = $RequiredClientIp
-    $EndIp = $RequiredClientIp
+    Return $ServerDetails
+}
+<#
+.SYNOPSIS
+Remove Azure Sql Server firewall rules with names matching given pattern.
 
-    Write-Verbose "Adding new firewall rule $RuleName to $ResourceGroupName/$ServerName for range $StartIp - $EndIp"
+.DESCRIPTION
+Remove Azure Sql Server firewall rules with names matching given pattern.
 
-    $Output = New-AzSqlServerFirewallRule -ResourceGroupName $ResourceGroupName -FirewallRuleName $RuleName -StartIpAddress $StartIp -EndIpAddress $EndIp
-    Return $RuleName
+.EXAMPLE
+
+
+```powershell
+# Regular expression for matching GUID string
+$GuidPattern = "([0-9a-z]{8})(-[0-9a-z]{4}){3}-([0-9a-z]{12})"
+
+# Firewall rule name prefix
+$RuleNamePrefix = "deploy-"
+
+# Database connection parameters for Invoke-SqlCmd
+$ConnectionParams = @{
+    ServerInstance = "$($Env:DB_SERVER).database.windows.net"
+    Database = $Env:DB_DATABASE
+    Username = $Env:DB_USERNAME
+    Password = $Env:DB_PASSWORD
 }
 
+# Get Sql Server parameters from the connection paramters
+$ServerParams = Detect-AzSqlServerFromConnectionParams $ConnectionParams -Verbose
 
+# Add firewall rule
+$NewRuleName = Ensure-SqlFirewallClientAccessRule -ConnectionParams $ConnectionParams -RuleNamePrefix $RuleNamePrefix -Verbose
+
+# Verify current rules
+Get-AzSqlServerFirewallRule @ServerParams
+
+# Do some work
+Invoke-Sqlcmd @ConnectionParams -Query "SELECT getdate()"
+
+# Remove firewall rules which start with the given prefix, followed by a GUID
+Remove-AzSqlServerFirewallRuleByPattern @ServerParams -FirewallRuleNamePattern "^${RuleNamePrefix}${GuidPattern}`$" -Verbose
+
+```
+
+#>
+
+function Remove-AzSqlServerFirewallRuleByPattern {
+    [cmdletbinding()]
+    param(
+        # Resource Group Name
+        [string]$ResourceGroupName,
+        # Azure Sql Server name - FQDN or resource name.
+        [string]$ServerName,
+        # Pattern to match
+        [string]$FirewallRuleNamePattern
+    )
+
+    $Rules = Get-AzSqlServerFirewallRule -ResourceGroupName $ResourceGroupName -ServerName $ServerName
+
+    $RuleNameMatchRegex = New-Object -TypeName System.Text.RegularExpressions.Regex -ArgumentList $FirewallRuleNamePattern
+
+    $Rules | ForEach {
+        if ($RuleNameMatchRegex.IsMatch($_.FirewallRuleName)) {
+            Write-Verbose "Remove rule $($_.FirewallRuleName)"
+            $Result = Remove-AzSqlServerFirewallRule -ResourceGroupName $ResourceGroupName -ServerName $ServerName -FirewallRuleName $_.FirewallRuleName
+        }
+    }
+}
 
