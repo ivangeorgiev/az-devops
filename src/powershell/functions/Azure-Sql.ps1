@@ -21,12 +21,12 @@ $ConnectionParams = @{
     Password = $Env:DB_PASSWORD
 }
 
-Detect-SqlRequiredFirewallClientIp -ConnectionParams $ConnectionParams -Verbose
+Find-IgSqlRequiredFirewallClientIp -ConnectionParams $ConnectionParams -Verbose
 
 ```
 
 #>
-function Detect-SqlRequiredFirewallClientIp {
+function Find-IgSqlRequiredFirewallClientIp {
     [cmdletbinding()]
     param(
         $ConnectionParams
@@ -39,13 +39,13 @@ function Detect-SqlRequiredFirewallClientIp {
         if ($output.Contains('THE_DATE') -eq $true) {
             Return $false
         }
-    } catch {
+    }
+    catch {
         Write-Verbose "Failed to reach SQL server. $($_.Exception.Message)"
         $ErrorMessage = ($errors | Out-String)
     }
 
-    if ($errors.Count -le 0) {
-        
+    if ( -not $errors ) {
         Return $false
     }
 
@@ -56,7 +56,8 @@ function Detect-SqlRequiredFirewallClientIp {
     if ($message.Contains("sp_set_firewall_rule") -eq $true -and $regex.IsMatch($message) -eq $true) {
         $IpAddress = $regex.match($message).Groups[0].Value
         Return $IpAddress
-    } else {
+    }
+    else {
         Throw "Failed to detect client IP address. Error message contains no sp_set_firewall_rule and ip address: $ErrorMessage"
     }
 }
@@ -91,14 +92,14 @@ try {
 } finally {
     # In case firewall rule was created, remove it
     if ($NewRuleName) {
-        $ServerParams = Detect-AzSqlServerFromConnectionParams $ConnectionParams -Verbose
+        $ServerParams = Convert-IgSqlConnectionParamsToServerParams $ConnectionParams -Verbose
         Remove-AzSqlServerFirewallRule @ServerParams -FirewallRuleName $NewRuleName
     }
 }
 ```
 
 #>
-function Ensure-SqlFirewallClientAccessRule {
+function Enable-IgSqlFirewallClientAccessRule {
     [cmdletbinding()]
     param(
         # Sql connection parameters to pass to Invoke-SqlCmd.
@@ -122,13 +123,13 @@ function Ensure-SqlFirewallClientAccessRule {
         [string]$ServerName
     )
 
-    $RequiredClientIp = Detect-SqlRequiredFirewallClientIp -ConnectionParams $ConnectionParams
+    $RequiredClientIp = Find-IgSqlRequiredFirewallClientIp -ConnectionParams $ConnectionParams
     if (-not $RequiredClientIp) {
         Write-Verbose "Client connects Ok. Seems client can connect."
         Return $False
     }
 
-    $ServerParams = Detect-AzSqlServerFromConnectionParams -ConnectionParams $ConnectionParams -ResourceGroupName $ResourceGroupName -ServerName $ServerName
+    $ServerParams = Convert-IgSqlConnectionParamsToServerParams -ConnectionParams $ConnectionParams -ResourceGroupName $ResourceGroupName -ServerName $ServerName
 
     if (-not $RuleName) {
         $RuleName = "$RuleNamePrefix$(New-Guid)"
@@ -140,7 +141,7 @@ function Ensure-SqlFirewallClientAccessRule {
 
     Write-Verbose "Adding new firewall rule $RuleName to $ResourceGroupName/$ServerName for range $StartIp - $EndIp"
 
-    $Output = New-AzSqlServerFirewallRule @ServerParams -FirewallRuleName $RuleName -StartIpAddress $StartIp -EndIpAddress $EndIp
+    $null = New-AzSqlServerFirewallRule @ServerParams -FirewallRuleName $RuleName -StartIpAddress $StartIp -EndIpAddress $EndIp
     Return $RuleName
 }
 
@@ -165,12 +166,12 @@ $ConnectionParams = @{
     Password = $Env:DB_PASSWORD
 }
 
-$ServerParams = Detect-AzSqlServerFromConnectionParams $ConnectionParams -Verbose
+$ServerParams = Convert-IgSqlConnectionParamsToServerParams $ConnectionParams -Verbose
 Remove-AzSqlServerFirewallRule @ServerParams -FirewallRuleName $NewRuleName
 ```
 
 #>
-function Detect-AzSqlServerFromConnectionParams {
+function Convert-IgSqlConnectionParamsToServerParams {
     [cmdletbinding()]
     param(
         [Parameter(Mandatory = $true, Position = 0)][ValidateNotNull()][ValidateNotNullOrEmpty()]
@@ -205,7 +206,7 @@ function Detect-AzSqlServerFromConnectionParams {
 
     $ServerDetails = @{
         ResourceGroupName = $ResourceGroupName
-        ServerName = $ServerName
+        ServerName        = $ServerName
     }
 
     Return $ServerDetails
@@ -236,7 +237,7 @@ $ConnectionParams = @{
 }
 
 # Get Sql Server parameters from the connection paramters
-$ServerParams = Detect-AzSqlServerFromConnectionParams $ConnectionParams -Verbose
+$ServerParams = Convert-IgSqlConnectionParamsToServerParams $ConnectionParams -Verbose
 
 # Add firewall rule
 $NewRuleName = Ensure-SqlFirewallClientAccessRule -ConnectionParams $ConnectionParams -RuleNamePrefix $RuleNamePrefix -Verbose
@@ -248,12 +249,12 @@ Get-AzSqlServerFirewallRule @ServerParams
 Invoke-Sqlcmd @ConnectionParams -Query "SELECT getdate()"
 
 # Remove firewall rules which start with the given prefix, followed by a GUID
-Remove-AzSqlServerFirewallRuleByPattern @ServerParams -FirewallRuleNamePattern "^${RuleNamePrefix}${GuidPattern}`$" -Verbose
+Remove-IgAzSqlServerFirewallRuleByPattern @ServerParams -FirewallRuleNamePattern "^${RuleNamePrefix}${GuidPattern}`$" -Verbose
 
 ```
 
 #>
-function Remove-AzSqlServerFirewallRuleByPattern {
+function Remove-IgAzSqlServerFirewallRuleByPattern {
     [cmdletbinding()]
     param(
         # Resource Group Name
@@ -273,10 +274,10 @@ function Remove-AzSqlServerFirewallRuleByPattern {
 
     $RuleNameMatchRegex = New-Object -TypeName System.Text.RegularExpressions.Regex -ArgumentList $FirewallRuleNamePattern
 
-    $Rules | ForEach {
+    $Rules | ForEach-Object {
         if ($RuleNameMatchRegex.IsMatch($_.FirewallRuleName)) {
             Write-Verbose "Remove rule $($_.FirewallRuleName)"
-            $Result = Remove-AzSqlServerFirewallRule -ResourceGroupName $ResourceGroupName -ServerName $ServerName -FirewallRuleName $_.FirewallRuleName
+            $null = Remove-AzSqlServerFirewallRule -ResourceGroupName $ResourceGroupName -ServerName $ServerName -FirewallRuleName $_.FirewallRuleName
         }
     }
 }
